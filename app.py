@@ -1,254 +1,114 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-app.py — Streamlit 可视化：A 股均线策略 + 波动率 / VaR 风控
-
-逻辑与 stock_alert.py 完全一致（数据、均线、风控阈值、买卖判断）。
-本文件只负责网页展示。
-
-启动方式（Mac 终端）：
-  cd /Users/luomashifeixiang/Desktop/python
-  streamlit run app.py
-
-浏览器会自动打开；若未打开，访问终端里显示的 Local URL（一般为 http://localhost:8501）。
-"""
-
-from __future__ import annotations
-
 import streamlit as st
+import akshare as ak
+import pandas as pd
+import plotly.express as px
 
-# 复用 stock_alert.py 中的数据获取、均线、风控与信号判断
-from stock_alert import (
-    DEFAULT_SYMBOL,
-    HISTORY_DAYS,
-    MA_LONG,
-    MA_SHORT,
-    MAX_ANNUAL_VOLATILITY,
-    MAX_VAR_95_RATIO,
-    RISK_WINDOW,
-    compute_moving_averages,
-    compute_risk_metrics,
-    evaluate_signal,
-    fetch_history_closes,
-    fetch_stock_name,
-    normalize_a_share_code,
-)
+# 1. 页面基础配置：深色专业金融风
+st.set_page_config(page_title="A股行业热度雷达", layout="wide", initial_sidebar_state="expanded")
 
-# ---------------------------------------------------------------------------
-# 页面基础配置
-# ---------------------------------------------------------------------------
-st.set_page_config(
-    page_title="量化风控大脑",
-    page_icon="📈",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+# 强制深色模式的一些自定义视觉样式
+st.markdown("""
+<style>
+    .reportview-container { background: #0e1117; color: #fafafa; }
+    h1, h2, h3 { color: #3b82f6; font-family: 'Noto Sans SC', sans-serif; }
+    .stMetric { background-color: #1e293b; padding: 15px; border-radius: 10px; border: 1px solid #334155; }
+</style>
+""", unsafe_allow_html=True)
 
-# 少量自定义样式：大标题、决策信号横幅
-st.markdown(
-    """
-    <style>
-    .main-title {
-        font-size: 2.4rem;
-        font-weight: 800;
-        text-align: center;
-        background: linear-gradient(90deg, #1a237e, #0d47a1, #1565c0);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        margin-bottom: 0.25rem;
-    }
-    .sub-title {
-        text-align: center;
-        color: #546e7a;
-        font-size: 1rem;
-        margin-bottom: 1.5rem;
-    }
-    .signal-buy {
-        padding: 1.25rem 1.5rem;
-        border-radius: 12px;
-        background: linear-gradient(135deg, #1b5e20, #2e7d32);
-        color: #ffffff;
-        font-size: 1.35rem;
-        font-weight: 700;
-        text-align: center;
-        box-shadow: 0 4px 14px rgba(46, 125, 50, 0.35);
-    }
-    .signal-hold {
-        padding: 1.25rem 1.5rem;
-        border-radius: 12px;
-        background: linear-gradient(135deg, #455a64, #607d8b);
-        color: #eceff1;
-        font-size: 1.35rem;
-        font-weight: 700;
-        text-align: center;
-        box-shadow: 0 4px 14px rgba(69, 90, 100, 0.25);
-    }
-  </style>
-    """,
-    unsafe_allow_html=True,
-)
+st.title("📊 A股行业热度预警雷达")
+st.markdown("监控行业资金流向，捕捉市场情绪拐点 | *数据来源: 东方财富 (基于 Akshare 开源库)*")
 
-
-@st.cache_data(ttl=300, show_spinner=False)
-def load_analysis(code: str) -> dict:
-    """
-    拉取并计算单只股票的全部分析结果（缓存 5 分钟，减轻接口压力）。
-
-    返回字典供页面各模块使用。
-    """
-    name = fetch_stock_name(code)
-    hist = fetch_history_closes(code, HISTORY_DAYS)
-    hist_ma = compute_moving_averages(hist)
-    risk = compute_risk_metrics(hist_ma, RISK_WINDOW)
-    buy, reason, summary = evaluate_signal(hist_ma, risk)
-    latest_date = hist_ma["日期"].iloc[-1].strftime("%Y-%m-%d")
-
-    return {
-        "code": code,
-        "name": name,
-        "hist_ma": hist_ma,
-        "risk": risk,
-        "buy": buy,
-        "reason": reason,
-        "summary": summary,
-        "latest_date": latest_date,
-    }
-
-
-def render_signal_banner(buy: bool, name: str, reason: str) -> None:
-    """页面最显眼处：绿色买入 / 灰色观望。"""
-    if buy:
-        st.markdown(
-            f'<div class="signal-buy">✅ 买入信号触发：{name} 符合策略且风险可控！</div>',
-            unsafe_allow_html=True,
-        )
-        st.caption(f"策略说明：{reason}")
-    else:
-        st.markdown(
-            '<div class="signal-hold">⏸ 保持观望</div>',
-            unsafe_allow_html=True,
-        )
-        st.caption(f"未触发原因：{reason}")
-
-
-def render_chart(hist_ma) -> None:
-    """近 60 日收盘价折线图，并叠加 MA5 / MA20。"""
-    chart_df = hist_ma.set_index("日期")[["收盘", f"ma{MA_SHORT}", f"ma{MA_LONG}"]].copy()
-    chart_df.columns = ["收盘价", f"MA{MA_SHORT}", f"MA{MA_LONG}"]
-    st.line_chart(chart_df, height=400)
-
-
-def main() -> None:
-    # ----- 顶部大标题 -----
-    st.markdown('<p class="main-title">我的私人量化风控大脑</p>', unsafe_allow_html=True)
-    st.markdown(
-        '<p class="sub-title">均线多头 + 波动率 / 历史 VaR 风控 · 数据来自 AKShare（东财 / 腾讯）</p>',
-        unsafe_allow_html=True,
-    )
-
-    # ----- 侧边栏：股票代码输入 -----
-    with st.sidebar:
-        st.header("查询设置")
-        raw_code = st.text_input(
-            "A 股代码（6 位数字）",
-            value=DEFAULT_SYMBOL,
-            max_chars=12,
-            help="例如 600519（贵州茅台）、600036（招商银行）",
-        )
-        st.caption("支持 sh600519、600519.SS 等写法，会自动规范化。")
-        analyze = st.button("开始分析", type="primary", use_container_width=True)
-        st.divider()
-        st.markdown("**策略条件**")
-        st.markdown(f"- MA{MA_SHORT} > MA{MA_LONG}")
-        st.markdown(f"- 年化波动率 ≤ {MAX_ANNUAL_VOLATILITY:.0%}")
-        st.markdown(f"- 95% VaR 占比 ≤ {MAX_VAR_95_RATIO:.0%}")
-        st.divider()
-        st.caption("免责声明：仅供学习，不构成投资建议。")
-
-    # 首次打开自动分析默认股；改代码后需点「开始分析」
-    first_visit = "bootstrapped" not in st.session_state
-    if not analyze and not first_visit:
-        st.info("👈 修改代码后，请点击左侧 **开始分析**。")
-        return
-
+# 2. 获取数据的函数 (加入缓存让网页加载变快)
+@st.cache_data(ttl=600)
+def get_industry_ranking():
     try:
-        code = normalize_a_share_code(raw_code)
-    except ValueError as exc:
-        st.error(str(exc))
-        return
+        # 获取东方财富行业板块实时数据
+        df = ak.stock_board_industry_name_em()
+        df = df[['板块名称', '最新价', '涨跌幅', '总市值', '换手率', '上涨家数', '下跌家数']]
+        df = df.sort_values(by='涨跌幅', ascending=False).reset_index(drop=True)
+        return df
+    except Exception as e:
+        return pd.DataFrame()
 
-    st.session_state["bootstrapped"] = True
+@st.cache_data(ttl=600)
+def get_industry_history(symbol):
+    try:
+        # 获取某个板块的历史数据走势
+        df = ak.stock_board_industry_hist_em(symbol=symbol, adjust="qfq")
+        return df.tail(15) # 取最近15个交易日
+    except:
+        return pd.DataFrame()
 
-    with st.spinner(f"正在获取 {code} 近 {HISTORY_DAYS} 日行情，请稍候…"):
-        try:
-            result = load_analysis(code)
-        except Exception as exc:
-            st.error(f"数据获取失败：{exc}")
-            st.warning(
-                "若频繁断连，可关闭 VPN/代理后重试：\n"
-                "`unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy`"
-            )
-            return
+# 3. 页面布局：左侧排名，右侧详情
+left_col, right_col = st.columns([1, 2])
 
-    name = result["name"]
-    risk = result["risk"]
-    summary = result["summary"]
-    buy = result["buy"]
-    reason = result["reason"]
-    hist_ma = result["hist_ma"]
+# 获取实时排行榜数据
+df_ranking = get_industry_ranking()
 
-    # ----- 决策信号（最显眼） -----
-    st.subheader("决策信号")
-    render_signal_banner(buy, name, reason)
-
-    st.divider()
-
-    # ----- 股票信息与核心指标卡片 -----
-    col_title, col_date = st.columns([3, 1])
-    with col_title:
-        st.markdown(f"### {name}（{code}）")
-    with col_date:
-        st.metric("最新交易日", result["latest_date"])
-
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("最新收盘价", f"{risk['last_price']:.2f} 元")
-    m2.metric(
-        f"近 {int(risk['window'])} 日年化波动率",
-        f"{risk['annual_volatility']:.2%}",
-        help=f"阈值 ≤ {MAX_ANNUAL_VOLATILITY:.0%}",
-    )
-    m3.metric(
-        "95% VaR 占比（1 日）",
-        f"{risk['var_95_ratio']:.2%}",
-        help=f"历史模拟法，阈值 ≤ {MAX_VAR_95_RATIO:.0%}",
-    )
-    m4.metric(
-        "95% VaR 金额",
-        f"{risk['var_95_amount']:.2f} 元",
-        help="占现价比例见上一列",
-    )
-
-    if summary:
-        st.caption(
-            f"MA{MA_SHORT} = {summary['ma_short']:.2f} 元 · "
-            f"MA{MA_LONG} = {summary['ma_long']:.2f} 元 · "
-            f"均线多头：{'是' if summary.get('trend_ok') else '否'} · "
-            f"波动率达标：{'是' if summary.get('vol_ok') else '否'} · "
-            f"VaR 达标：{'是' if summary.get('var_ok') else '否'}"
+with left_col:
+    st.subheader("🔥 实时板块涨跌幅榜")
+    if not df_ranking.empty:
+        # 在左侧显示一个漂亮的交互式表格
+        st.dataframe(
+            df_ranking[['板块名称', '涨跌幅', '换手率']].head(31), 
+            use_container_width=True,
+            hide_index=True
         )
+        
+        # 让用户交互式选择一个行业看详情
+        industry_list = df_ranking['板块名称'].tolist()
+        selected_industry = st.selectbox("👉 选择一个行业板块查看资金走势:", industry_list)
+    else:
+        st.error("数据抓取失败，请检查网络或稍后再试。")
+        selected_industry = None
 
-    st.divider()
-
-    # ----- 价格走势图 -----
-    st.subheader(f"近 {HISTORY_DAYS} 日收盘价走势")
-    render_chart(hist_ma)
-
-    with st.expander("查看原始数据（最近 10 行）"):
-        show_cols = ["日期", "收盘", f"ma{MA_SHORT}", f"ma{MA_LONG}"]
-        display = hist_ma[show_cols].tail(10).copy()
-        display["日期"] = display["日期"].dt.strftime("%Y-%m-%d")
-        st.dataframe(display, use_container_width=True, hide_index=True)
-
-
-if __name__ == "__main__":
-    main()
+with right_col:
+    if selected_industry:
+        st.subheader(f"📈 {selected_industry} - 资金趋势与 AI 情绪评估")
+        
+        # 抓取选定行业的历史数据
+        df_hist = get_industry_history(selected_industry)
+        
+        if not df_hist.empty:
+            # { "user_intent": "LEARN_CONCEPT" }
+            # 提取当天的具体数据
+            current_data = df_ranking[df_ranking['板块名称'] == selected_industry].iloc[0]
+            
+            # 显示顶部核心指标卡片（Metric 组件）
+            col1, col2, col3 = st.columns(3)
+            col1.metric("今日涨跌幅", f"{current_data['涨跌幅']}%", 
+                        delta="强势上攻" if current_data['涨跌幅'] > 0 else "回调走弱")
+            col2.metric("行业换手率", f"{current_data['换手率']}%", 
+                        delta="交投活跃" if current_data['换手率'] > 3 else "交投平淡", delta_color="off")
+            col3.metric("板块红绿家数比", f"涨 {current_data['上涨家数']} : 跌 {current_data['下跌家数']}")
+            
+            # 用 Plotly 画一张专业的深色折线图
+            st.markdown("##### 行业指数收盘价走势趋势线")
+            fig = px.line(df_hist, x='日期', y='收盘', markers=True, template="plotly_dark")
+            fig.update_traces(line_color='#10b981', line_width=3)
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # AI 情绪解读模块 (完美闭环你的产品设计逻辑)
+            st.markdown("---")
+            st.subheader("🤖 政策脉搏 & 散户情绪评估")
+            
+            # 根据真实数据进行条件化 AI 综述模拟
+            if current_data['涨跌幅'] > 2.5:
+                vibe_status = "🔴 情绪亢奋区（短线主力抢筹，防范冲高回落）"
+                policy_vibe = "该板块今日遭遇资金强烈共振，政策预期极强。散户跟风盘活跃，建议关注具备业绩支撑的滞涨龙头，切忌盲目追高。"
+            elif current_data['涨跌幅'] < -2.5:
+                vibe_status = "🟢 情绪冰点区（恐慌盘杀跌，进入左侧观察期）"
+                policy_vibe = "行业遭遇短期获利了结或政策利空压制，资金净流出明显。短线建议规避，但如果核心基本面未变，可留意冰点带来的错杀建仓机会。"
+            else:
+                vibe_status = "⚪ 情绪收敛区（多空博弈平衡，处于震荡整理）"
+                policy_vibe = "今日板块无明显异动，换手率处于正常水位。建议保持观望，等待新一轮政策催化剂或主力资金的放量信号。"
+                
+            st.info(f"**市场水位监测：** {vibe_status}")
+            st.success(f"**AI 投资策略综述：** {policy_vibe}")
+            
+            # 底部合规红线声明
+            st.markdown("""
+            <p style='font-size: 12px; color: #64748b; text-align: center; margin-top: 30px;'>
+            免责声明：本工具仅供量化逻辑演示与学术交流，不构成任何实质性投资建议。市场有风险，入市需谨慎。
+            </p>
+            """, unsafe_allow_html=True)
