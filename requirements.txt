@@ -1,0 +1,16 @@
+# Streamlit Cloud 部署依赖（由项目内 .py 文件 import 分析得出）
+# 主入口：app.py → stock_alert.py
+
+# app.py
+streamlit>=1.28.0
+
+# stock_alert.py, stock_demo.py
+akshare>=1.14.0
+pandas>=2.0.0
+numpy>=1.24.0
+
+# stock_demo.py（matplotlib 绘图，可选模块）
+matplotlib>=3.8.0
+
+# stock_test.py（雅虎行情测试脚本，仓库内可选）
+yfinance>=0.2.40
